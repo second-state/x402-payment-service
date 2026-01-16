@@ -9,4 +9,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-x402 = { git = "https://github.com/coinbase/x402.git", subdirectory = "python/x402" }
+x402 = { git = "https://github.com/coinbase/x402.git", subdirectory = "python/x402", rev = "95b01e1463ee717cda3a80c3883864d4728e8408" }
