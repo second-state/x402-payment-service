@@ -3,7 +3,7 @@ from typing import Any, Optional
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 from x402.types import PaymentRequirements, SettleResponse, VerifyResponse
 
 
@@ -46,9 +46,6 @@ class EIP2612PaymentPayload(BaseModel):
 
 
 class FacilitatorClientExt(FacilitatorClient):
-    def __init__(self, config: Optional[FacilitatorConfig] = None):
-        super().__init__(config)
-
     async def verify_eip2612(
         self,
         payload: EIP2612PaymentPayload,

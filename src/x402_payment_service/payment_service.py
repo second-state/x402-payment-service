@@ -14,6 +14,7 @@ from x402.types import (PaymentPayload, PaymentRequirements, PaywallConfig,
                         x402PaymentRequiredResponse)
 
 from .facilitator_ext import EIP2612PaymentPayload, FacilitatorClientExt
+from .paywall_adapter import get_paywall_adapter_script
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class PaymentService:
                 - address: Token contract address
                 - decimals: Token decimals (default 18)
                 - name: Token name for EIP-712 domain
+                - symbol: Token symbol for display
                 - version: Token version for EIP-712 domain (default "1")
         """
         self.app_name = app_name
@@ -144,6 +146,45 @@ class PaymentService:
             )
         ]
 
+    def _inject_paywall_adapter(self, html: str) -> str:
+        """Inject paywall adapter script for custom token support."""
+        if not self.token_config or not self.token_config.get("address"):
+            return html
+
+        symbol = self.token_config.get("symbol", "TOKEN")
+        address = self.token_config["address"]
+        decimals = self.token_config.get("decimals", 18)
+        name = self.token_config.get("name", symbol)
+        version = self.token_config.get("version", "1")
+
+        token_config_json = json.dumps({
+            "symbol": symbol,
+            "address": address,
+            "decimals": decimals,
+            "name": name,
+            "version": version
+        })
+
+        adapter_script = get_paywall_adapter_script()
+
+        head_injection = f'''
+<script>
+window.__x402_token = {token_config_json};
+window.__x402_display_amount = {self.price};
+</script>
+'''
+        body_injection = f'''
+<script>
+{adapter_script}
+</script>
+'''
+        html = html.replace("</head>", f"{head_injection}</head>")
+        if "</body>" in html:
+            html = html.replace("</body>", f"{body_injection}</body>")
+        else:
+            html += body_injection
+        return html
+
     def response(self, error: str) -> tuple:
         """Create a 402 response with payment requirements.
 
@@ -157,6 +198,7 @@ class PaymentService:
             html_content = get_paywall_html(
                 error, self.payment_requirements, self.paywall_config
             )
+            html_content = self._inject_paywall_adapter(html_content)
             return html_content, 400
         else:
             response_data = x402PaymentRequiredResponse(
