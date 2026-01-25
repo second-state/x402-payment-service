@@ -2,21 +2,39 @@
 
 import json
 import logging
-from typing import Optional
+from decimal import Decimal
+from enum import Enum
+from typing import Optional, Union
 
 from x402.common import (find_matching_payment_requirements,
                          process_price_to_atomic_amount, x402_VERSION)
 from x402.encoding import safe_base64_decode
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorConfig
 from x402.paywall import get_paywall_html, is_browser_request
 from x402.types import (PaymentPayload, PaymentRequirements, PaywallConfig,
                         x402PaymentRequiredResponse)
 
+from .facilitator_ext import EIP2612PaymentPayload, FacilitatorClientExt
+
 logger = logging.getLogger(__name__)
 
 
+class PaymentScheme(str, Enum):
+    """Supported payment schemes for x402 payments."""
+
+    ERC3009 = "erc3009"  # USDC TransferWithAuthorization
+    EIP2612 = "eip2612"  # ERC-20 Permit
+
+
+PaymentPayloadUnion = Union[PaymentPayload, EIP2612PaymentPayload]
+
+
 class PaymentService:
-    """Service class for handling x402 payment operations."""
+    """Service class for handling x402 payment operations.
+
+    Supports both ERC-3009 (USDC TransferWithAuthorization) and
+    EIP-2612 (Permit) payment flows.
+    """
 
     def __init__(
         self,
@@ -29,7 +47,8 @@ class PaymentService:
         network: str,
         pay_to_address: str,
         facilitator_url: str,
-        max_timeout_seconds: int = 60
+        max_timeout_seconds: int = 60,
+        token_config: Optional[dict] = None
     ):
         """Initialize PaymentService.
 
@@ -44,6 +63,12 @@ class PaymentService:
             pay_to_address: Address to receive payment
             facilitator_url: Facilitator service URL
             max_timeout_seconds: Maximum timeout for payment
+            token_config: Optional custom token configuration dict with keys:
+                - address: Token contract address
+                - decimals: Token decimals (default 18)
+                - name: Token name for EIP-712 domain
+                - symbol: Token symbol for display
+                - version: Token version for EIP-712 domain (default "1")
         """
         self.app_name = app_name
         self.app_logo = app_logo
@@ -54,6 +79,7 @@ class PaymentService:
         self.network = network
         self.pay_to_address = pay_to_address
         self.facilitator_url = facilitator_url
+        self.token_config = token_config
         self.paywall_config = PaywallConfig(
             app_name=self.app_name,
             app_logo=self.app_logo,
@@ -63,7 +89,19 @@ class PaymentService:
         # Create payment requirements on initialization
         self.payment_requirements = self._create_payment_requirements()
         self.facilitator_config = FacilitatorConfig(url=self.facilitator_url)
-        self.facilitator = FacilitatorClient(self.facilitator_config)
+
+        # Use extended client for EIP-2612 support
+        self.facilitator = FacilitatorClientExt(self.facilitator_config)
+        self._scheme: PaymentScheme = PaymentScheme.ERC3009
+
+    def _find_matching_requirements_eip2612(
+        self, payload: EIP2612PaymentPayload
+    ) -> Optional[PaymentRequirements]:
+        """Find matching payment requirements for EIP-2612 payload."""
+        for req in self.payment_requirements:
+            if req.pay_to.lower() == payload.transfer.to.lower():
+                return req
+        return None
 
     def _create_payment_requirements(self) -> list[PaymentRequirements]:
         """Create payment requirements for the payment.
@@ -71,6 +109,29 @@ class PaymentService:
         Returns:
             List of PaymentRequirements
         """
+        if self.token_config and self.token_config.get("address"):
+            decimals = self.token_config.get("decimals", 18)
+            atomic_amount = int(Decimal(str(self.price)) * Decimal(10**decimals))
+            eip712_domain = {}
+            if self.token_config.get("name"):
+                eip712_domain["name"] = self.token_config["name"]
+                eip712_domain["version"] = self.token_config.get("version", "1")
+            return [
+                PaymentRequirements(
+                    scheme="exact",
+                    network=self.network,
+                    asset=self.token_config["address"],
+                    max_amount_required=str(atomic_amount),
+                    resource=self.resource_url,
+                    description=self.description,
+                    mime_type="text/html",
+                    pay_to=self.pay_to_address,
+                    max_timeout_seconds=self.max_timeout_seconds,
+                    extra=eip712_domain,
+                    output_schema={},
+                )
+            ]
+
         max_amount_required, asset_address, eip712_domain = (
             process_price_to_atomic_amount(f"${self.price:.2f}", self.network)
         )
@@ -113,7 +174,7 @@ class PaymentService:
             ).model_dump(by_alias=True)
             return response_data, 402
 
-    def parse(self) -> tuple[bool, Optional[PaymentPayload], Optional[PaymentRequirements], Optional[str]]:
+    def parse(self) -> tuple[bool, Optional[PaymentPayloadUnion], Optional[PaymentRequirements], Optional[str]]:
         """Parse and validate payment header.
 
         Returns:
@@ -126,31 +187,50 @@ class PaymentService:
         if not payment_header:
             return False, None, None, "No X-PAYMENT header provided"
 
-        logger.info(
-            f"Received X-PAYMENT header: {payment_header}")
+        logger.info(f"Received X-PAYMENT header: {payment_header}")
 
         try:
             payment_dict = json.loads(safe_base64_decode(payment_header))
-            payment = PaymentPayload(**payment_dict)
-            logger.info(f"Decoded payment payload: {payment}")
+
+            # Check if this is an EIP-2612 payload
+            if FacilitatorClientExt.is_eip2612_payload(payment_dict):
+                logger.info("Detected EIP-2612 payload")
+                eip2612_payload = FacilitatorClientExt.parse_eip2612_payload(payment_dict)
+                if not eip2612_payload:
+                    logger.error("Failed to parse EIP-2612 payload")
+                    return False, None, None, "Invalid EIP-2612 payment payload"
+
+                self._scheme = PaymentScheme.EIP2612
+                selected_payment_requirements = self._find_matching_requirements_eip2612(eip2612_payload)
+                if not selected_payment_requirements:
+                    logger.error("No matching payment requirements found for EIP-2612")
+                    return False, eip2612_payload, None, "No matching payment requirements found"
+
+                logger.info(f"Parsed EIP-2612 payload: permit owner={eip2612_payload.permit.owner}")
+                return True, eip2612_payload, selected_payment_requirements, None
+            else:
+                # Standard ERC-3009 payload
+                payment = PaymentPayload(**payment_dict)
+                logger.info(f"Decoded payment payload: {payment}")
+
+                selected_payment_requirements = find_matching_payment_requirements(
+                    self.payment_requirements, payment
+                )
+                if not selected_payment_requirements:
+                    logger.error("No matching payment requirements found")
+                    return False, payment, None, "No matching payment requirements found"
+
+                self._scheme = PaymentScheme.ERC3009
+                logger.info(f"Selected payment requirements: {selected_payment_requirements}")
+                return True, payment, selected_payment_requirements, None
+
         except Exception as e:
             logger.error(f"Failed to decode payment header: {e}")
             return False, None, None, f"Invalid payment header format: {e}"
 
-        selected_payment_requirements = find_matching_payment_requirements(
-            self.payment_requirements, payment
-        )
-        if not selected_payment_requirements:
-            logger.error("No matching payment requirements found")
-            return False, payment, None, "No matching payment requirements found"
-
-        logger.info(
-            f"Selected payment requirements: {selected_payment_requirements}")
-        return True, payment, selected_payment_requirements, None
-
     async def verify(
         self,
-        payment: PaymentPayload,
+        payment: PaymentPayloadUnion,
         requirements: PaymentRequirements,
         order_id: str
     ) -> tuple[bool, Optional[str]]:
@@ -166,24 +246,29 @@ class PaymentService:
             If valid, error_message is None
         """
         try:
-            verify_response = await self.facilitator.verify(payment, requirements)
+            if self._scheme == PaymentScheme.EIP2612:
+                verify_response = await self.facilitator.verify_eip2612(
+                    payment, requirements  # type: ignore
+                )
+            else:
+                verify_response = await self.facilitator.verify(
+                    payment, requirements  # type: ignore
+                )
         except Exception as e:
             logger.error(f"Payment verification failed ({order_id}): {e}")
             return False, f"Payment verification failed: {e}"
 
         if not verify_response.is_valid:
             error_reason = verify_response.invalid_reason or "Unknown error"
-            logger.error(
-                f"Payment verification failed ({order_id}): {error_reason}")
+            logger.error(f"Payment verification failed ({order_id}): {error_reason}")
             return False, f"Payment verification failed: {error_reason}"
 
-        logger.info(
-            f"Payment verified successfully ({order_id}): {verify_response}")
+        logger.info(f"Payment verified successfully ({order_id}): {verify_response}")
         return True, None
 
     async def settle(
         self,
-        payment: PaymentPayload,
+        payment: PaymentPayloadUnion,
         requirements: PaymentRequirements,
         order_id: str
     ) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
@@ -199,13 +284,20 @@ class PaymentService:
             If successful, error_message is None
         """
         try:
-            settle_response = await self.facilitator.settle(payment, requirements)
+            if self._scheme == PaymentScheme.EIP2612:
+                settle_response = await self.facilitator.settle_eip2612(
+                    payment, requirements  # type: ignore
+                )
+            else:
+                settle_response = await self.facilitator.settle(
+                    payment, requirements  # type: ignore
+                )
+
             logger.info(f"Settle response ({order_id}): {settle_response}")
 
             if not settle_response.success:
                 error_reason = settle_response.error_reason or "Unknown error"
-                logger.error(
-                    f"Payment settlement not success ({order_id}): {error_reason}")
+                logger.error(f"Payment settlement not success ({order_id}): {error_reason}")
                 return False, None, None, f"Payment settlement not success: {error_reason}"
 
             logger.info(f"Payment settled successfully ({order_id})")

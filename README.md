@@ -92,6 +92,30 @@ if __name__ == "__main__":
 | `pay_to_address` | str | Address to receive payment |
 | `facilitator_url` | str | Facilitator service URL |
 | `max_timeout_seconds` | int | Maximum timeout for payment (default: 60) |
+| `token_config` | dict | Optional. Custom token configuration for non-USDC tokens (see below) |
+
+#### Custom Token Configuration (EIP-2612)
+
+For custom ERC-20 tokens instead of USDC, provide the `token_config` parameter:
+
+```python
+payment_service = PaymentService(
+    # ... other parameters
+    token_config={
+        "address": "0xYourTokenContractAddress",
+        "decimals": 18,
+        "name": "MyToken",
+        "version": "1",
+    }
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `address` | str | Token contract address (required) |
+| `decimals` | int | Token decimals (default: 18) |
+| `name` | str | Token name for EIP-712 domain |
+| `version` | str | Token version for EIP-712 (default: "1") |
 
 #### Methods
 
