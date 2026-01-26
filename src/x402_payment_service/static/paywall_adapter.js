@@ -3,13 +3,14 @@
   const TOKEN = window.__x402_token || { symbol: 'TOKEN', address: '', decimals: 18, name: '', version: '1' };
   const DISPLAY_AMOUNT = window.__x402_display_amount || 0;
   const PERMIT_DEADLINE = 3600;
+  const IS_NATIVE = TOKEN.native === true;
 
-  if (!TOKEN.address) return;
+  if (!IS_NATIVE && !TOKEN.address) return;
 
   if (window.x402?.paymentRequirements?.[0]?.extra) {
     const extra = window.x402.paymentRequirements[0].extra;
-    if (extra.name) TOKEN.name = extra.name;
-    if (extra.version) TOKEN.version = extra.version;
+    TOKEN.name = TOKEN.name || extra.name || TOKEN.symbol;
+    TOKEN.version = TOKEN.version || extra.version || '1';
   }
 
   function formatAmount(atomic, decimals) {
@@ -25,37 +26,45 @@
     try {
       const accounts = await window.ethereum.request({ method: 'eth_accounts' });
       if (!accounts?.length) return null;
+      if (IS_NATIVE) {
+        const result = await window.ethereum.request({ method: 'eth_getBalance', params: [accounts[0], 'latest'] });
+        return formatAmount(result, TOKEN.decimals);
+      }
       const data = '0x70a08231' + accounts[0].slice(2).padStart(64, '0');
       const result = await window.ethereum.request({ method: 'eth_call', params: [{ to: TOKEN.address, data }, 'latest'] });
       return formatAmount(result, TOKEN.decimals);
     } catch { return null; }
   }
 
-  async function updateBalance() {
-    const bal = await getBalance();
-    if (bal === null) return;
-    document.querySelectorAll('[data-x402-balance]').forEach(el => {
-      el.textContent = `${bal} ${TOKEN.symbol}`;
+  function replaceText() {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+
+    nodes.forEach(node => {
+      const parent = node.parentNode;
+      if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') return;
+
+      let t = node.nodeValue;
+      if (!t?.trim()) return;
+
+      let changed = false;
+      if (t.includes('USDC')) { t = t.replace(/USDC/g, TOKEN.symbol); changed = true; }
+      if (/\$[\d,]+(?:\.\d+)?/.test(t) || /[\d,]{7,}/.test(t)) {
+        const p = new RegExp(`\\$[\\d,]+(?:\\.\\d+)?(?:\\s*${TOKEN.symbol})?|\\$?[\\d,]{7,}(?:\\.\\d+)?(?:\\s*${TOKEN.symbol})?`, 'g');
+        t = t.replace(p, `${DISPLAY_AMOUNT} ${TOKEN.symbol}`);
+        changed = true;
+      }
+      if (changed) node.nodeValue = t;
     });
   }
 
-  function replaceText() {
-    const amountStr = `${DISPLAY_AMOUNT} ${TOKEN.symbol}`;
-    document.querySelectorAll('h1, h2, h3, p, span, div, button, a').forEach(el => {
-      if (el.children.length === 0 && el.textContent) {
-        let t = el.textContent;
-        t = t.replace(/\$[\d.]+\s*USD/gi, amountStr);
-        t = t.replace(/[\d.]+\s*USDC/gi, amountStr);
-        t = t.replace(/USDC/g, TOKEN.symbol);
-        if (t !== el.textContent) el.textContent = t;
-      }
-    });
-    document.querySelectorAll('[data-x402-amount]').forEach(el => {
-      el.textContent = amountStr;
-    });
-    document.querySelectorAll('[data-x402-balance]').forEach(el => {
-      if (!el.textContent || el.textContent.includes('USDC') || el.textContent.includes('USD')) {
-        el.textContent = `-- ${TOKEN.symbol}`;
+  async function updateBalance() {
+    const balance = await getBalance();
+    if (!balance) return;
+    document.querySelectorAll('[class*="balance"], .balance-button').forEach(el => {
+      if (el.textContent?.includes('USDC') || el.textContent?.includes('•')) {
+        el.textContent = `${balance} ${TOKEN.symbol}`;
       }
     });
   }
@@ -93,6 +102,24 @@
         try {
           const data = JSON.parse(args.params[1]);
           if (data?.primaryType === 'TransferWithAuthorization') {
+            // Native token: send actual transaction instead of signing
+            if (IS_NATIVE) {
+              const signer = args.params[0];
+              const msg = data.message || {};
+              const valueHex = '0x' + BigInt(msg.value).toString(16);
+              const txHash = await origRequest({
+                method: 'eth_sendTransaction',
+                params: [{ from: signer, to: msg.to, value: valueHex }]
+              });
+              window.__x402_nativePaymentData = {
+                txHash,
+                from: signer,
+                to: msg.to,
+                amountWei: msg.value.toString()
+              };
+              return txHash;
+            }
+            // EIP-2612: convert to Permit
             const domain = data.domain || {};
             const msg = data.message || {};
             const owner = args.params[0];
@@ -147,15 +174,26 @@
   const origFetch = window.fetch;
   window.fetch = async function(...args) {
     try {
-      if (window.__x402_eip2612_permit && args[1]?.headers) {
+      if (args[1]?.headers) {
         const h = args[1].headers;
         const xpay = h['X-PAYMENT'] || h['x-payment'];
         if (xpay) {
-          const payload = { x402Version: 1, scheme: 'exact', network: window.x402?.paymentRequirements?.[0]?.network || 'base-sepolia', payload: { permit: window.__x402_eip2612_permit, transfer: window.__x402_eip2612_transfer } };
-          const encoded = btoa(JSON.stringify(payload));
-          if (h instanceof Headers) { h.set('X-PAYMENT', encoded); } else { h['X-PAYMENT'] = encoded; }
-          delete window.__x402_eip2612_permit;
-          delete window.__x402_eip2612_transfer;
+          // Native token payment
+          if (IS_NATIVE && window.__x402_nativePaymentData) {
+            const np = window.__x402_nativePaymentData;
+            const payload = { x402Version: 1, scheme: 'native', network: window.x402?.paymentRequirements?.[0]?.network || 'base-sepolia', payload: { txHash: np.txHash, from: np.from, to: np.to, amountWei: np.amountWei } };
+            const encoded = btoa(JSON.stringify(payload));
+            if (h instanceof Headers) { h.set('X-PAYMENT', encoded); } else { h['X-PAYMENT'] = encoded; }
+            window.__x402_nativePaymentData = null;
+          }
+          // EIP-2612 permit payment
+          else if (window.__x402_eip2612_permit) {
+            const payload = { x402Version: 1, scheme: 'exact', network: window.x402?.paymentRequirements?.[0]?.network || 'base-sepolia', payload: { permit: window.__x402_eip2612_permit, transfer: window.__x402_eip2612_transfer } };
+            const encoded = btoa(JSON.stringify(payload));
+            if (h instanceof Headers) { h.set('X-PAYMENT', encoded); } else { h['X-PAYMENT'] = encoded; }
+            delete window.__x402_eip2612_permit;
+            delete window.__x402_eip2612_transfer;
+          }
         }
       }
     } catch {}

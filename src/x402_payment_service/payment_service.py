@@ -14,7 +14,12 @@ from x402.paywall import get_paywall_html, is_browser_request
 from x402.types import (PaymentPayload, PaymentRequirements, PaywallConfig,
                         x402PaymentRequiredResponse)
 
-from .facilitator_ext import EIP2612PaymentPayload, FacilitatorClientExt
+from .facilitator_ext import (
+    EIP2612PaymentPayload,
+    FacilitatorClientExt,
+    NATIVE_TOKEN_ADDRESS,
+    NativePaymentPayload,
+)
 from .paywall_adapter import get_paywall_adapter_script
 
 logger = logging.getLogger(__name__)
@@ -25,9 +30,10 @@ class PaymentScheme(str, Enum):
 
     ERC3009 = "erc3009"  # USDC TransferWithAuthorization
     EIP2612 = "eip2612"  # ERC-20 Permit
+    NATIVE = "native"    # Native token (ETH, AVAX, etc.)
 
 
-PaymentPayloadUnion = Union[PaymentPayload, EIP2612PaymentPayload]
+PaymentPayloadUnion = Union[PaymentPayload, EIP2612PaymentPayload, NativePaymentPayload]
 
 
 class PaymentService:
@@ -49,7 +55,8 @@ class PaymentService:
         pay_to_address: str,
         facilitator_url: str,
         max_timeout_seconds: int = 60,
-        token_config: Optional[dict] = None
+        token_config: Optional[dict] = None,
+        native_token: bool = False
     ):
         """Initialize PaymentService.
 
@@ -70,6 +77,7 @@ class PaymentService:
                 - name: Token name for EIP-712 domain
                 - symbol: Token symbol for display
                 - version: Token version for EIP-712 domain (default "1")
+            native_token: If True, accept native token payments (ETH, AVAX, etc.)
         """
         self.app_name = app_name
         self.app_logo = app_logo
@@ -81,6 +89,7 @@ class PaymentService:
         self.pay_to_address = pay_to_address
         self.facilitator_url = facilitator_url
         self.token_config = token_config
+        self.native_token = native_token
         self.paywall_config = PaywallConfig(
             app_name=self.app_name,
             app_logo=self.app_logo,
@@ -104,30 +113,52 @@ class PaymentService:
                 return req
         return None
 
+    def _find_matching_requirements_native(
+        self, payload: NativePaymentPayload
+    ) -> Optional[PaymentRequirements]:
+        """Find matching payment requirements for native token payload."""
+        for req in self.payment_requirements:
+            if req.pay_to.lower() == payload.to.lower():
+                return req
+        return None
+
     def _inject_paywall_adapter(self, html: str) -> str:
         """Inject paywall adapter script for custom token support."""
-        if not self.token_config or not self.token_config.get("address"):
+        if not self.token_config:
             return html
 
-        symbol = self.token_config.get("symbol", "TOKEN")
-        address = self.token_config["address"]
-        decimals = self.token_config.get("decimals", 18)
-        name = self.token_config.get("name", symbol)
-        version = self.token_config.get("version", "1")
-
-        token_config_json = json.dumps({
-            "symbol": symbol,
-            "address": address,
-            "decimals": decimals,
-            "name": name,
-            "version": version
-        })
+        if self.native_token:
+            symbol = self.token_config.get("symbol", "ETH")
+            decimals = self.token_config.get("decimals", 18)
+            name = self.token_config.get("name", symbol)
+            token_config_json = json.dumps({
+                "symbol": symbol,
+                "decimals": decimals,
+                "name": name,
+                "native": True
+            })
+        elif self.token_config.get("address"):
+            symbol = self.token_config.get("symbol", "TOKEN")
+            address = self.token_config["address"]
+            decimals = self.token_config.get("decimals", 18)
+            name = self.token_config.get("name", symbol)
+            version = self.token_config.get("version", "1")
+            token_config_json = json.dumps({
+                "symbol": symbol,
+                "address": address,
+                "decimals": decimals,
+                "name": name,
+                "version": version
+            })
+        else:
+            return html
 
         adapter_script = get_paywall_adapter_script()
+        display_amount = f"{self.price:.10f}".rstrip('0').rstrip('.')
         head_injection = f'''
 <script>
 window.__x402_token = {token_config_json};
-window.__x402_display_amount = {self.price};
+window.__x402_display_amount = {display_amount};
 </script>
 '''
         body_injection = f'''
@@ -148,6 +179,27 @@ window.__x402_display_amount = {self.price};
         Returns:
             List of PaymentRequirements
         """
+        if self.native_token:
+            decimals = 18
+            if self.token_config and self.token_config.get("decimals"):
+                decimals = self.token_config["decimals"]
+            atomic_amount = int(Decimal(str(self.price)) * Decimal(10**decimals))
+            return [
+                PaymentRequirements(
+                    scheme="native",
+                    network=self.network,
+                    asset=NATIVE_TOKEN_ADDRESS,
+                    max_amount_required=str(atomic_amount),
+                    resource=self.resource_url,
+                    description=self.description,
+                    mime_type="text/html",
+                    pay_to=self.pay_to_address,
+                    max_timeout_seconds=self.max_timeout_seconds,
+                    extra={},
+                    output_schema={},
+                )
+            ]
+
         if self.token_config and self.token_config.get("address"):
             decimals = self.token_config.get("decimals", 18)
             atomic_amount = int(Decimal(str(self.price)) * Decimal(10**decimals))
@@ -232,8 +284,25 @@ window.__x402_display_amount = {self.price};
         try:
             payment_dict = json.loads(safe_base64_decode(payment_header))
 
+            # Check if this is a native token payload
+            if FacilitatorClientExt.is_native_payload(payment_dict):
+                logger.info("Detected native token payload")
+                native_payload = FacilitatorClientExt.parse_native_payload(payment_dict)
+                if not native_payload:
+                    logger.error("Failed to parse native token payload")
+                    return False, None, None, "Invalid native token payment payload"
+
+                self._scheme = PaymentScheme.NATIVE
+                selected_payment_requirements = self._find_matching_requirements_native(native_payload)
+                if not selected_payment_requirements:
+                    logger.error("No matching payment requirements found for native token")
+                    return False, native_payload, None, "No matching payment requirements found"
+
+                logger.info(f"Parsed native token payload: tx_hash={native_payload.tx_hash}, from={native_payload.from_}")
+                return True, native_payload, selected_payment_requirements, None
+
             # Check if this is an EIP-2612 payload
-            if FacilitatorClientExt.is_eip2612_payload(payment_dict):
+            elif FacilitatorClientExt.is_eip2612_payload(payment_dict):
                 logger.info("Detected EIP-2612 payload")
                 eip2612_payload = FacilitatorClientExt.parse_eip2612_payload(payment_dict)
                 if not eip2612_payload:
@@ -286,7 +355,11 @@ window.__x402_display_amount = {self.price};
             If valid, error_message is None
         """
         try:
-            if self._scheme == PaymentScheme.EIP2612:
+            if self._scheme == PaymentScheme.NATIVE:
+                verify_response = await self.facilitator.verify_native(
+                    payment, requirements  # type: ignore
+                )
+            elif self._scheme == PaymentScheme.EIP2612:
                 verify_response = await self.facilitator.verify_eip2612(
                     payment, requirements  # type: ignore
                 )
@@ -324,7 +397,11 @@ window.__x402_display_amount = {self.price};
             If successful, error_message is None
         """
         try:
-            if self._scheme == PaymentScheme.EIP2612:
+            if self._scheme == PaymentScheme.NATIVE:
+                settle_response = await self.facilitator.settle_native(
+                    payment, requirements  # type: ignore
+                )
+            elif self._scheme == PaymentScheme.EIP2612:
                 settle_response = await self.facilitator.settle_eip2612(
                     payment, requirements  # type: ignore
                 )
