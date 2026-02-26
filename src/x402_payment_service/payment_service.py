@@ -26,13 +26,13 @@ EIP3009_TOKENS = {
         "base": {
             "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "decimals": 6,
-            "name": "USDC",
+            "name": "USD Coin",
             "version": "2",
         },
         "base-sepolia": {
             "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
             "decimals": 6,
-            "name": "USDC",
+            "name": "USD Coin",
             "version": "2",
         },
     },
@@ -40,13 +40,13 @@ EIP3009_TOKENS = {
         "base": {
             "address": "0x0c59d37a843d2632AE93BA2eb4253e426CAC038C",
             "decimals": 6,
-            "name": "KII",
+            "name": "KII Token",
             "version": "1",
         },
         "base-sepolia": {
             "address": "0xb3f5d498D8Ef4E91d2c95AfDF711b66Cee6A49f3",
             "decimals": 6,
-            "name": "KII",
+            "name": "KII Token",
             "version": "1",
         },
     },
