@@ -48,9 +48,11 @@
       let t = node.nodeValue;
       if (!t?.trim()) return;
 
+      const inBalanceButton = parent.closest && parent.closest('.balance-button');
+
       let changed = false;
       if (t.includes('USDC')) { t = t.replace(/USDC/g, TOKEN.symbol); changed = true; }
-      if (/\$[\d,]+(?:\.\d+)?/.test(t) || /[\d,]{7,}/.test(t)) {
+      if (!inBalanceButton && (/\$[\d,]+(?:\.\d+)?/.test(t) || /[\d,]{7,}/.test(t))) {
         const p = new RegExp(`\\$[\\d,]+(?:\\.\\d+)?(?:\\s*${TOKEN.symbol})?|\\$?[\\d,]{7,}(?:\\.\\d+)?(?:\\s*${TOKEN.symbol})?`, 'g');
         t = t.replace(p, `${DISPLAY_AMOUNT} ${TOKEN.symbol}`);
         changed = true;
@@ -86,6 +88,14 @@
   document.readyState === 'loading'
     ? document.addEventListener('DOMContentLoaded', init)
     : init();
+
+  // Block the balance button click to prevent React from re-rendering "USDC"
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.balance-button')) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  }, true);
 
   new MutationObserver((m) => {
     if (!ready || processing) return;
