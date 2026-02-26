@@ -71,17 +71,28 @@
     });
   }
 
-  let processing = false, debounce = null, ready = false;
+  let processing = false, ready = false;
+  const observerOpts = { childList: true, subtree: true, characterData: true };
 
   function update() {
     if (processing) return;
     processing = true;
-    try { replaceText(); } finally { processing = false; }
+    observer.disconnect();
+    try { replaceText(); } finally {
+      observer.observe(document.body, observerOpts);
+      processing = false;
+    }
   }
+
+  const observer = new MutationObserver(() => {
+    if (!ready || processing) return;
+    update();
+  });
 
   function init() {
     update();
     ready = true;
+    observer.observe(document.body, observerOpts);
     setTimeout(updateBalance, 1000);
   }
 
@@ -96,14 +107,6 @@
       e.preventDefault();
     }
   }, true);
-
-  new MutationObserver((m) => {
-    if (!ready || processing) return;
-    if (m.some(x => x.type === 'childList' && x.addedNodes.length)) {
-      clearTimeout(debounce);
-      debounce = setTimeout(update, 150);
-    }
-  }).observe(document.body, { childList: true, subtree: true });
 
   if (window.ethereum) {
     const origRequest = window.ethereum.request.bind(window.ethereum);
