@@ -183,19 +183,19 @@ class PaymentService:
                     "name": name,
                     "version": version
                 })
-        elif self.eip3009_token.lower() != "usdc":
-            # Non-USDC ERC-3009 token: inject adapter to replace
-            # "USDC" text and amounts in the upstream paywall UI
+        # Non-USDC ERC-3009 tokens: inject adapter with erc3009 flag
+        # (adapter passes through signing, only does display + balance)
+        if not token_config_json and self.eip3009_token.lower() != "usdc":
             token_key = self.eip3009_token.lower()
-            network_tokens = EIP3009_TOKENS.get(token_key, {})
-            token_info = network_tokens.get(self.network, {})
-            if token_info:
+            if token_key in EIP3009_TOKENS and self.network in EIP3009_TOKENS[token_key]:
+                info = EIP3009_TOKENS[token_key][self.network]
                 token_config_json = json.dumps({
-                    "symbol": token_info["name"],
-                    "address": token_info["address"],
-                    "decimals": token_info["decimals"],
-                    "name": token_info["name"],
-                    "version": token_info["version"],
+                    "symbol": token_key.upper(),
+                    "address": info["address"],
+                    "decimals": info["decimals"],
+                    "name": info["name"],
+                    "version": info["version"],
+                    "erc3009": True,
                 })
 
         if not token_config_json:

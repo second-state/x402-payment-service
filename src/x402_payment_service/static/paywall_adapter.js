@@ -132,6 +132,8 @@
               };
               return txHash;
             }
+            // ERC-3009: pass through (x402 SDK paywall already has correct domain)
+            if (TOKEN.erc3009) return origRequest(args);
             // EIP-2612: convert to Permit
             const domain = data.domain || {};
             const msg = data.message || {};
