@@ -44,7 +44,7 @@ EIP3009_TOKENS = {
         "ethereum-sepolia": {
             "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
             "decimals": 6,
-            "name": "USD Coin",
+            "name": "USDC",
             "version": "2",
         },
     },
@@ -166,6 +166,60 @@ class PaymentService:
             if req.pay_to.lower() == payload.to.lower():
                 return req
         return None
+
+    @staticmethod
+    def _patch_paywall_networks(html: str) -> str:
+        """Patch the bundled paywall JS to support additional networks.
+
+        The x402 paywall template has hardcoded network arrays that don't
+        include ethereum networks. This patches the minified JS to add them.
+        """
+        # Patch the Xv EVM network array in PAYWALL_TEMPLATE (used by Ste())
+        html = html.replace(
+            '"skale-base-sepolia"]',
+            '"skale-base-sepolia","ethereum","ethereum-sepolia"]',
+        )
+        # Patch the Wee network-to-chainId map in PAYWALL_TEMPLATE (used by wR())
+        html = html.replace(
+            '["skale-base-sepolia",324705682]])',
+            '["skale-base-sepolia",324705682],["ethereum",1],["ethereum-sepolia",11155111]])',
+        )
+        # Patch wagmi config to include ethereum chains (zi=mainnet, CM=sepolia)
+        # and add default transports for them
+        html = html.replace(
+            'chains:[dr,Ya]',
+            'chains:[dr,Ya,zi,CM]',
+        )
+        html = html.replace(
+            '[Ya.id]:e?mu(`https://api.developer.coinbase.com/rpc/v1/base-sepolia/${e}`):mu()}})',
+            '[Ya.id]:e?mu(`https://api.developer.coinbase.com/rpc/v1/base-sepolia/${e}`):mu(),'
+            '[zi.id]:mu("https://eth.merkle.io"),'
+            '[CM.id]:mu("https://sepolia.drpc.org")}})',
+        )
+        # Patch chain selection in Hft component:
+        # original: z==="base-sepolia"?Ya:dr (only Base/Base Sepolia)
+        # patched:  add ethereum→zi, ethereum-sepolia→CM
+        html = html.replace(
+            'z==="base-sepolia"?Ya:dr',
+            'z==="base-sepolia"?Ya:z==="ethereum"?zi:z==="ethereum-sepolia"?CM:dr',
+        )
+        # Patch LF USDC registry: add ethereum mainnet and sepolia USDC addresses
+        html = html.replace(
+            '324705682:{usdcAddress:"0x2e08028E3C4c2356572E096d8EF835cD5C6030bD",usdcName:"Bridged USDC (SKALE Bridge)"}}',
+            '324705682:{usdcAddress:"0x2e08028E3C4c2356572E096d8EF835cD5C6030bD",usdcName:"Bridged USDC (SKALE Bridge)"},'
+            '1:{usdcAddress:"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",usdcName:"USD Coin"},'
+            '11155111:{usdcAddress:"0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",usdcName:"USDC"}}',
+        )
+        # Patch Rne/Ane in paywall.html (if used as fallback)
+        html = html.replace(
+            '"iotex"],Ane=new Map(',
+            '"iotex","ethereum","ethereum-sepolia"],Ane=new Map(',
+        )
+        html = html.replace(
+            '["iotex",4689]])',
+            '["iotex",4689],["ethereum",1],["ethereum-sepolia",11155111]])',
+        )
+        return html
 
     def _inject_paywall_adapter(self, html: str) -> str:
         """Inject paywall adapter script for custom token support."""
@@ -309,7 +363,7 @@ window.__x402_display_amount = {display_amount};
         }
 
         return [
-            PaymentRequirements(
+            PaymentRequirements.model_construct(
                 scheme="exact",
                 network=self.network,
                 asset=asset_address,
@@ -337,6 +391,7 @@ window.__x402_display_amount = {display_amount};
             html_content = get_paywall_html(
                 error, self.payment_requirements, self.paywall_config
             )
+            html_content = self._patch_paywall_networks(html_content)
             html_content = self._inject_paywall_adapter(html_content)
             return html_content, 400
         else:
