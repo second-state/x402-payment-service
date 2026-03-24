@@ -35,6 +35,18 @@ EIP3009_TOKENS = {
             "name": "USD Coin",
             "version": "2",
         },
+        "ethereum": {
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "decimals": 6,
+            "name": "USD Coin",
+            "version": "2",
+        },
+        "ethereum-sepolia": {
+            "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+            "decimals": 6,
+            "name": "USD Coin",
+            "version": "2",
+        },
     },
     "kii": {
         "base": {
@@ -522,6 +534,8 @@ window.__x402_display_amount = {display_amount};
         explorers = {
             "base-sepolia": f"https://sepolia.basescan.org/tx/{tx_hash}",
             "base": f"https://basescan.org/tx/{tx_hash}",
+            "ethereum-sepolia": f"https://sepolia.etherscan.io/tx/{tx_hash}",
+            "ethereum": f"https://etherscan.io/tx/{tx_hash}",
         }
 
         return explorers.get(network, '')
