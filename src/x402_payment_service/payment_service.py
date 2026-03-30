@@ -6,6 +6,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional, Union
 
+import httpx
+
 from x402.common import find_matching_payment_requirements, x402_VERSION
 from x402.encoding import safe_base64_decode
 from x402.facilitator import FacilitatorConfig
@@ -168,6 +170,26 @@ class PaymentService:
         return None
 
     @staticmethod
+    def _get_facilitator_signer(facilitator_url: str, network: str) -> Optional[str]:
+        """Get the facilitator's signer address for a given network."""
+        network_to_caip2 = {
+            "base-sepolia": "eip155:84532",
+            "base": "eip155:8453",
+            "ethereum": "eip155:1",
+            "ethereum-sepolia": "eip155:11155111",
+        }
+        try:
+            resp = httpx.get(f"{facilitator_url}/supported", timeout=10.0)
+            resp.raise_for_status()
+            signers = resp.json().get("signers", {})
+            caip2 = network_to_caip2.get(network, f"eip155:{network}")
+            chain_signers = signers.get(caip2, [])
+            return chain_signers[0] if chain_signers else None
+        except Exception as e:
+            logger.error(f"Failed to get facilitator signer: {e}")
+            return None
+
+    @staticmethod
     def _patch_paywall_networks(html: str) -> str:
         """Patch the bundled paywall JS to support additional networks.
 
@@ -269,10 +291,13 @@ class PaymentService:
 
         adapter_script = get_paywall_adapter_script()
         display_amount = f"{self.price:.10f}".rstrip('0').rstrip('.')
+        facilitator_signer = self._get_facilitator_signer(self.facilitator_url, self.network)
+        facilitator_signer_js = json.dumps(facilitator_signer)
         head_injection = f'''
 <script>
 window.__x402_token = {token_config_json};
 window.__x402_display_amount = {display_amount};
+window.__x402_facilitator_signer = {facilitator_signer_js};
 </script>
 '''
         body_injection = f'''

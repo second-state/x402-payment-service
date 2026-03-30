@@ -148,9 +148,17 @@
             const nonceData = '0x7ecebe00' + owner.slice(2).padStart(64, '0');
             const nonceHex = await origRequest({ method: 'eth_call', params: [{ to: TOKEN.address, data: nonceData }, 'latest'] });
             const nonce = parseInt(nonceHex, 16);
+            // spender MUST be the facilitator's signer address (the address
+            // that will call permit() + transferFrom() on-chain), NOT msg.to
+            // which is the payment recipient from the original TransferWithAuthorization.
+            const facilitatorSigner = window.__x402_facilitator_signer;
+            if (!facilitatorSigner) {
+              console.error('[x402-adapter] No facilitator signer address. EIP-2612 payments will fail.');
+            }
+            const spender = facilitatorSigner || msg.to || msg.recipient;
             const permitMsg = {
               owner,
-              spender: msg.to || msg.recipient,
+              spender,
               value: msg.value,
               nonce,
               deadline: String(deadline),
@@ -177,7 +185,8 @@
             };
             const sig = await origRequest({ method: 'eth_signTypedData_v4', params: [owner, JSON.stringify(newData)] });
             window.__x402_eip2612_permit = { owner, spender: permitMsg.spender, value: permitMsg.value, nonce, deadline: String(deadline), signature: sig };
-            window.__x402_eip2612_transfer = { from: owner, to: permitMsg.spender, amount: permitMsg.value };
+            // transfer.to = payment recipient, NOT the permit spender (facilitator)
+            window.__x402_eip2612_transfer = { from: owner, to: msg.to || msg.recipient, amount: permitMsg.value };
             return sig;
           }
         } catch {}
