@@ -210,6 +210,17 @@ class PaymentService:
             '1:{usdcAddress:"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",usdcName:"USD Coin"},'
             '11155111:{usdcAddress:"0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",usdcName:"USDC"}}',
         )
+        # Patch the standalone publicClient in EvmPaywall (Hft component):
+        # original: ox({chain:V,transport:mu()})  — mu() with no URL uses viem's
+        #           built-in default (eth.merkle.io for mainnet), which is unreliable.
+        # patched:  provide explicit RPC URLs for ethereum chains, matching the
+        #           wagmi transport config above; void 0 keeps defaults for Base.
+        html = html.replace(
+            'transport:mu()}).extend(j8)',
+            'transport:mu(V.id===1?"https://ethereum-rpc.publicnode.com"'
+            ':V.id===11155111?"https://sepolia.drpc.org"'
+            ':void 0)}).extend(j8)',
+        )
         # Patch Rne/Ane in paywall.html (if used as fallback)
         html = html.replace(
             '"iotex"],Ane=new Map(',
