@@ -193,7 +193,7 @@ class PaymentService:
         html = html.replace(
             '[Ya.id]:e?mu(`https://api.developer.coinbase.com/rpc/v1/base-sepolia/${e}`):mu()}})',
             '[Ya.id]:e?mu(`https://api.developer.coinbase.com/rpc/v1/base-sepolia/${e}`):mu(),'
-            '[zi.id]:mu("https://eth.merkle.io"),'
+            '[zi.id]:mu("https://ethereum-rpc.publicnode.com"),'
             '[CM.id]:mu("https://sepolia.drpc.org")}})',
         )
         # Patch chain selection in Hft component:
